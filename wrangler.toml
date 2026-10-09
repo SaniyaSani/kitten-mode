@@ -1,0 +1,4 @@
+name = "kitten-mode"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]   # lets llm.mjs read process.env.ANTHROPIC_API_KEY
+pages_build_output_dir = "public"
