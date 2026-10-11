@@ -4,14 +4,15 @@ import { callJSON } from "./llm.mjs";
 const PEDAGOGY = `You write for an intelligent, curious university student with ZERO assumed background.
 Never shame, never say "obviously". Teach in this order: why does this exist -> intuition -> tiny example -> precise technical definition.
 Safe -> intuitive -> precise. Never trade correctness for cuteness. Keep each field short (1-3 sentences).
-PROVENANCE: only claim the professor said something that is in the supplied transcript. Everything else is your own explanation.`;
+PROVENANCE: only claim the professor said something that is in the supplied transcript. Everything else is your own explanation.
+TRANSCRIPT FIDELITY: transcript lines marked [UNCLEAR] were not reliably heard. Never repair them, never guess a plausible scientific sentence for them, never quote them as what the professor said, and never build a definition, number or formula on them. If a concept only appears in an [UNCLEAR] line, say it is uncertain.`;
 
 const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 const str = (x, n = 600) => (typeof x === "string" ? x.slice(0, n) : "");
 
 // Stage 1: which concepts did the lecturer use or assume, and how do they depend on each other?
 export async function extractConcepts({ course, segments }) {
-  const lines = segments.map(s => `[${s.i}] ${s.text}`).join("\n").slice(0, 60000);
+  const lines = segments.map(s => `[${s.i}] ${s.unclear ? "[UNCLEAR] " : ""}${s.text}`).join("\n").slice(0, 60000);
   const out = await callJSON({
     system: `You analyse a university lecture transcript for the course "${course}". Find the 6-25 key technical concepts, including hidden prerequisites the lecturer assumed but never explained (at most 5 of those).
 JSON: {"concepts":[{"name":"","aliases":["spoken or written forms to match in the transcript"],"group":"short topic heading","firstSeg":0,"pre":["names of prerequisite concepts"],"assumed":false}]}`,
@@ -29,7 +30,7 @@ JSON: {"concepts":[{"name":"","aliases":["spoken or written forms to match in th
 
 // Stage 2: write the five explanation levels for a batch of concepts (run in parallel batches).
 export async function explainConcepts({ course, concepts, segments }) {
-  const ctx = segments.slice(0, 80).map(s => s.text).join(" ").slice(0, 6000);
+  const ctx = segments.slice(0, 80).filter(s => !s.unclear).map(s => s.text).join(" ").slice(0, 6000);
   const out = await callJSON({
     system: `${PEDAGOGY}\nCourse: "${course}". For each concept write:
 why (the problem that made it necessary, start with a concrete situation), simple, kitten (warm, plain words), zero (from absolutely nothing, define every term), cats (a correct analogy with cats), technical (precise university-level definition), prof (why the lecturer probably brought it up here, grounded in the transcript), next (what likely follows), emoji (one), example (a tiny concrete example, code if it fits, max 6 lines), steps (2-5 short strings: what happens, in order), misunderstandings (1-3 short strings: common wrong beliefs and the correction).
@@ -54,7 +55,7 @@ export async function analyzeLecture({ course, segments }) {
 
 // Rescue: last ~5 minutes -> a card short enough to read while the lecturer keeps talking.
 export async function rescue({ segments, known = [] }) {
-  const text = segments.map(s => `[${s.t}s] ${s.text}`).join("\n").slice(0, 12000);
+  const text = segments.map(s => `[${s.t}s] ${s.unclear ? "[UNCLEAR] " : ""}${s.text}`).join("\n").slice(0, 12000);
   const out = await callJSON({
     system: `${PEDAGOGY}\nA student lost the thread during a lecture. From the last minutes of transcript, say where we are.
 Be brief. The student already knows: ${JSON.stringify(known)}.

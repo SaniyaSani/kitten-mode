@@ -72,4 +72,23 @@ assert.ok(col.exam.some(i => /exam/i.test(i.excerpt)) || true);
 
 // hand-written explanations are complete
 for (const id of ids()) { const k = KB[id]; for (const f of ['why', 'simple', 'kitten', 'zero', 'cats', 'technical', 'prof', 'next']) assert.ok(k[f] && k[f].length > 3, id + '.' + f); for (const p of k.pre) assert.ok(KB[p], id + ' prereq ' + p); }
+
+// ---- transcript versions: re-transcribing never destroys anything, citations stay exact ----
+import * as tc from './public/js/transcripts-core.js';
+{
+  const L = { id: 'tx1', courseId: 'esc401', title: 'T', segments: [{ t: 0, text: 'a' }, { t: 5, text: 'b' }], cleanEdits: { 1: { text: 'B' } }, cleanAdds: [], transcriptSource: 'live', created: 1, hasAudio: true };
+  D.lectures.push(L);
+  D.notes.push({ id: 'n9', courseId: 'esc401', title: 'n', blocks: [{ type: 'ref', ref: { type: 'seg', lectureId: 'tx1', seg: 1, t: 5 }, quote: 'b' }, { type: 'ref', ref: { type: 'seg', lectureId: 'w3', seg: 0, t: 0 } }] });
+  D.tasks.push({ id: 't9', courseId: 'esc401', title: 't', ref: { type: 'seg', lectureId: 'tx1', seg: 0, t: 0 } });
+  const r = tc.applyTranscript(L, [{ t: 0, end: 4, text: 'Der Wert ist vierzig', unclear: true, reasons: ['low-confidence'], low: [[0, 3]] }, { t: 4, text: 'Klar.' }], { source: 'stt', meta: { engine: 'faster-whisper', model: 'large-v3', language: 'de' } });
+  assert.equal(r.archived, true); assert.equal(r.frozen, 2);
+  assert.equal(L.tversions.length, 1); assert.equal(L.tversions[0].segments[1].text, 'b'); assert.equal(L.tversions[0].cleanEdits[1].text, 'B', 'old corrections are kept with the old version');
+  assert.equal(L.segments[0].text, 'Der Wert ist vierzig', 'text is stored exactly as heard'); assert.equal(L.segments[0].unclear, true); assert.deepEqual(L.segments[0].low, [[0, 3]]); assert.equal(L.segments[1].unclear, undefined);
+  assert.deepEqual(L.cleanEdits, {}); assert.equal(L.lang, 'de'); assert.equal(L.transcriptSource, 'stt');
+  const nr = D.notes.find(n => n.id === 'n9').blocks; assert.equal(nr[0].ref.type, 'audio'); assert.equal(nr[0].ref.t, 5); assert.equal(nr[0].ref.seg, undefined); assert.equal(nr[0].quote, 'b');
+  assert.equal(nr[1].ref.type, 'seg', 'citations of other lectures are untouched'); assert.equal(D.tasks.find(t => t.id === 't9').ref.type, 'audio');
+  assert.ok(tc.restoreVersion(L, L.tversions[0].id)); assert.equal(L.segments.length, 2); assert.equal(L.cleanEdits[1].text, 'B'); assert.equal(L.tversions.length, 1); assert.equal(L.tversions[0].segments[0].text, 'Der Wert ist vierzig');
+  assert.equal(tc.archiveTranscript({ segments: [] }), null, 'nothing to archive for an empty transcript');
+}
+
 console.log('lib tests passed:', ids().length, 'concepts');

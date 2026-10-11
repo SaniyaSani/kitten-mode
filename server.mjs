@@ -6,13 +6,14 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { randomUUID } from "node:crypto";
-import { sttProvider, transcribe } from "./stt.mjs";
+import { sttProvider, sttInfo, sttInit, transcribe } from "./stt.mjs";
 import { llmAvailable } from "./llm.mjs";
 import { analyzeLecture, rescue, explainSelection } from "./stages.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const run = promisify(execFile);
 const has = async cmd => { try { await run(cmd, ["-v"], { timeout: 4000 }).catch(e => { if (e.code === "ENOENT") throw e; }); return true; } catch (e) { return false; } };
+await sttInit();
 const CAN = { pdf: await has("pdftotext"), pptx: await has("unzip") };
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" };
 const PUB = path.resolve(new URL("./public", import.meta.url).pathname);
@@ -28,10 +29,10 @@ async function startJob(req, url) {
     await pipeline(req, new Transform({ transform(c, _e, cb) { n += c.length; n > max ? cb(Object.assign(new Error("recording too large"), { status: 413 })) : cb(null, c); } }), createWriteStream(file));
   } catch (e) { await rm(dir, { recursive: true, force: true }); throw e; }
   const id = randomUUID(), job = { status: "working", progress: 0 }; jobs.set(id, job);
-  const prompt = (url.searchParams.get("prompt") || "").slice(0, 800);
-  transcribe(file, dir, { prompt, onProgress: p => { job.progress = p; } })
-    .then(s => { job.segments = s; job.status = "done"; job.progress = 1; })
-    .catch(() => { job.status = "error"; })
+  const prompt = (url.searchParams.get("prompt") || "").slice(0, 800), glossary = (url.searchParams.get("glossary") || "").slice(0, 600), lang = /^(auto|[a-z]{2,3})$/.test(url.searchParams.get("lang") || "") ? url.searchParams.get("lang") : "auto";
+  transcribe(file, dir, { prompt, glossary, lang, onProgress: p => { job.progress = p; } })
+    .then(s => { job.segments = s; job.meta = s.meta || { engine: sttProvider() }; job.status = "done"; job.progress = 1; })
+    .catch(e => { console.error("transcription failed:", String(e.message).slice(0, 400)); job.status = "error"; })
     .finally(() => { rm(dir, { recursive: true, force: true }); setTimeout(() => jobs.delete(id), 30 * 60e3).unref(); }); // audio is deleted from the server right away
   return { job: id };
 }
@@ -70,7 +71,7 @@ const hits = new Map(); // tiny per-IP rate limit: 30 requests / minute
 const limited = ip => { const now = Date.now(), a = (hits.get(ip) || []).filter(t => now - t < 60000); a.push(now); hits.set(ip, a); return a.length > 30; };
 const readBody = req => new Promise((res, rej) => { let n = 0, b = ""; req.on("data", c => { n += c.length; if (n > 2e6) { rej(Object.assign(new Error("too big"), { status: 413 })); req.destroy() } else b += c }); req.on("end", () => { try { res(JSON.parse(b || "{}")) } catch (e) { rej(Object.assign(e, { status: 400 })) } }); });
 const send = (res, code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
-const cleanSegs = a => (Array.isArray(a) ? a : []).slice(0, 1500).map((s, i) => ({ i: Number.isInteger(s.i) ? s.i : i, t: +s.t || 0, text: String(s.text || "").slice(0, 1200) }));
+const cleanSegs = a => (Array.isArray(a) ? a : []).slice(0, 1500).map((s, i) => ({ i: Number.isInteger(s.i) ? s.i : i, t: +s.t || 0, text: String(s.text || "").slice(0, 1200), unclear: !!s.unclear }));
 
 http.createServer(async (req, res) => {
   try {
@@ -82,7 +83,7 @@ http.createServer(async (req, res) => {
       catch (e) { return send(res, 404, { error: "not found" }); }
     }
     if (!url.pathname.startsWith("/api/")) return send(res, 404, { error: "not found" });
-    if (url.pathname === "/api/status") return send(res, 200, { llm: llmAvailable(), stt: sttProvider(), extract: CAN });
+    if (url.pathname === "/api/status") return send(res, 200, { llm: llmAvailable(), stt: sttProvider(), sttInfo: sttInfo(), extract: CAN });
     const jm = url.pathname.match(/^\/api\/job\/([0-9a-f-]{36})$/);
     if (req.method === "GET" && jm) { const j = jobs.get(jm[1]); return j ? send(res, 200, j) : send(res, 404, { error: "gone" }); }
     if (limited(req.socket.remoteAddress)) return send(res, 429, { error: "slow down" });

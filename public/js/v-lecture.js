@@ -8,6 +8,7 @@ import { SEL, setSel, clearSel, selSheet, autoNote, mkBlock, newNote, addTask, s
 import { tasksBlock } from './v-tasks.js';
 import { materialsBlock } from './v-materials.js';
 import { offerTranscribe, isProcessing } from './v-capture.js';
+import { applyTranscript, provenanceBar, versionsOf } from './transcripts.js';
 import { WEEK3_SAMPLE } from './fixtures.js';
 import * as player from './player.js';
 
@@ -23,14 +24,22 @@ function unsureBlock(L, i, sg) {
 H.fixAlt = d => { const L = lec(d.id), sg = L.segments[+d.i]; sg.fixed = d.a; sg.unsure = null; save('lectures', L); render(); };
 const backChips = (L, i) => { const b = backlinks(L.id, i); return [...b.notes.map(n => `<button class="chip" data-act="openRef" data-ref="${refAttr({ type: 'note', noteId: n.id })}" title="A note of yours points here">📝 ${esc((n.title || 'Untitled').slice(0, 28))}</button>`), ...b.tasks.map(t => `<button class="chip" data-act="openRef" data-ref="${refAttr({ type: 'task', id: t.id })}" title="A task points here">✅ ${esc(t.title.slice(0, 28))}</button>`)].join(''); };
 
+const WHY = { 'low-confidence': 'the model was not sure what was said', 'maybe-no-speech': 'this may be noise rather than speech', 'repetitive': 'the model got stuck on repeated words', 'many-uncertain-words': 'several words in a row were uncertain' };
+/* The text is shown exactly as heard. Words the model was unsure about are only underlined, never changed. */
+function segHtml(sg) {
+  if (sg.edit || !sg.low || !sg.low.length) return esc(segText(sg));
+  let out = '', pos = 0; const t = sg.text;
+  for (const [a, b] of sg.low) { if (a < pos || b > t.length) continue; out += esc(t.slice(pos, a)) + `<span class="lowp" title="The speech model was unsure about this word">${esc(t.slice(a, b))}</span>`; pos = b; }
+  return out + esc(t.slice(pos));
+}
 function segRow(L, i, sg) {
   const em = emphasisOf(sg), edited = !!sg.edit, code = codeOf(sg);
-  return `<div class="seg${sg.imp ? ' imp' : ''}" data-seg="${i}" id="seg-${i}">
+  return `<div class="seg${sg.imp ? ' imp' : ''}${sg.unclear ? ' unclear' : ''}" data-seg="${i}" id="seg-${i}">
   <button class="ts" data-act="playSeg" data-id="${L.id}" data-t="${sg.t}" aria-label="Play from ${fmt(sg.t)}">▶ ${fmt(sg.t)}</button>
   <div>${L.fixture ? prov('fixture') : prov('prof')}${edited ? ' ' + prov('edited') : ''}${sg.imp ? ' <span class="tag t-new">⭐ Important</span>' : ''}
-  <p class="segtext" data-seg="${i}" style="margin:.25em 0">${esc(segText(sg))}</p>
+  <p class="segtext" data-seg="${i}" style="margin:.25em 0">${segHtml(sg)}</p>
   ${edited ? `<button class="mini-act" data-act="rawToggle">see the original wording</button><div class="diff" hidden><b>Original:</b> ${esc(sg.text)}<br><button class="link" data-act="restoreSeg" data-id="${L.id}" data-i="${i}">Restore the original wording</button></div>` : ''}
-  ${em ? '<span class="tag t-out">✨ Professor emphasis</span>' : ''}${sg.lowconf ? '<div class="unsure">🎧 I may have misheard this. The speech service was not sure about this sentence.</div>' : ''}${unsureBlock(L, i, sg)}
+  ${em ? '<span class="tag t-out">✨ Professor emphasis</span>' : ''}${sg.unclear || sg.lowconf ? `<div class="unsure">🎧 <b>Unclear.</b> I may have misheard this${sg.reasons && sg.reasons.length ? ' (' + esc(sg.reasons.map(r => WHY[r] || r).join('; ')) + ')' : ''}. Listen to this moment before you rely on it. I have not guessed or fixed anything.</div>` : ''}${unsureBlock(L, i, sg)}
   ${code ? codeBlock(code, { small: true, note: sg.unsure ? 'reconstructed from speech, please check' : 'reconstructed from speech' }) : ''}
   <div class="seg-tools">${backChips(L, i)}<button class="mini-act" data-act="impSeg" data-id="${L.id}" data-i="${i}" aria-pressed="${!!sg.imp}">${sg.imp ? '⭐ Unmark' : '⭐ Important'}</button><button class="mini-act" data-act="editSeg" data-id="${L.id}" data-i="${i}">✏️ Correct</button><button class="mini-act" data-act="rescueAt" data-id="${L.id}" data-t="${sg.t}">🆘 Explain around here</button><button class="mini-act" data-act="segMenu" data-id="${L.id}" data-i="${i}">⋯ More</button></div></div></div>`;
 }
@@ -49,7 +58,7 @@ H.playSeg = d => player.playAt(lec(d.id), +d.t);
 /* ---------- Original ---------- */
 function origTab(L) {
   const f = V.filter || 'all', segs = L.segments.map((s, i) => ({ s, i })).filter(({ s }) => f === 'imp' ? s.imp : f === 'emph' ? emphasisOf(s) : f === 'code' ? codeOf(s) : f === 'edit' ? s.edit : true);
-  return `<div class="paper small">Exactly what was said, in order. ${L.fixture ? '' : 'Corrections you make sit on top of the original words and can always be undone.'} Select any words to do something with them.</div>
+  return `${provenanceBar(L)}<div class="paper small">Exactly what was said, in order. ${L.fixture ? '' : 'Corrections you make sit on top of the original words and can always be undone.'} Select any words to do something with them.</div>
   <div class="big-search"><input type="search" id="segfind" data-in="segFind" placeholder="Find in this transcript…" aria-label="Find in this transcript"><span class="small muted" id="findcount"></span></div>
   <div class="filters" role="group" aria-label="Show">${[['all', 'All'], ['imp', '⭐ Important'], ['emph', '✨ Emphasis'], ['code', '💻 With code'], ['edit', '✏️ Edited']].map(([k, l]) => `<button class="pill${f === k ? ' on' : ''}" aria-pressed="${f === k}" data-act="segFilter" data-f="${k}">${l}</button>`).join('')}</div>
   ${segs.length ? segs.map(({ s, i }) => segRow(L, i, s)).join('') : `<p class="muted">Nothing matches this filter.</p>`}`;
@@ -217,8 +226,8 @@ H.pasteTx = async d => {
   closeSheet(); const L = lec(d.id);
   const v = await ask({ title: 'Paste a transcript', intro: 'Lines like <code>12:14 text…</code> keep their time. Lines without a time are spaced 30 s apart.', fields: [{ id: 'tx', label: 'Transcript', type: 'textarea', rows: 10, value: '' }], ok: 'Use this transcript' });
   if (!v || !v.tx.trim()) return;
-  if (L.segments.length && !await confirmSheet({ title: 'Replace the current transcript?', intro: 'Corrections and clean edits that you made on the old transcript will be removed. Notes keep their links, but they may point at different words.', ok: 'Replace', danger: true })) return;
-  L.segments = parseTranscript(v.tx); L.cleanEdits = {}; L.transcriptSource = 'pasted'; delete L.fixture; L.concepts = null; L.cids = null; L.status = 'ready'; L.tasksScanned = false;
+  if (L.segments.length && !await confirmSheet({ title: 'Replace the current transcript?', intro: 'The current transcript is kept as an earlier version (with your corrections). Links in your notes become “moment in the recording” links so they stay exact.', ok: 'Replace' })) return;
+  applyTranscript(L, parseTranscript(v.tx), { source: 'pasted', label: 'replaced by a pasted transcript' }); L.status = 'ready';
   L.duration = Math.max(L.duration || 0, L.segments[L.segments.length - 1].t + 30); save('lectures', L); scanTasks(L); render(); toast('Transcript added.');
 };
 H.sampleTx = d => { const L = lec(d.id); L.segments = WEEK3_SAMPLE.map(s => ({ ...s })); L.fixture = 'esc401-w3-sample'; L.transcriptSource = 'fixture'; L.status = 'ready'; L.duration = Math.max(L.duration || 0, 1400); L.cleanEdits = {}; save('lectures', L); scanTasks(L); render(); toast('🧪 Sample text loaded. It is labelled as a sample everywhere.'); };
@@ -230,7 +239,9 @@ H.lecMenu = d => {
   <button class="btn soft" data-act="renameLec" data-id="${L.id}">✏️ Rename or change date</button>
   <button class="btn soft" data-act="moveLec" data-id="${L.id}">📁 Move to another week</button>
   <button class="btn soft" data-act="attachAudio" data-id="${L.id}" data-then="close">🎧 ${L.hasAudio ? 'Replace the audio' : 'Attach audio'}</button>
-  <button class="btn soft" data-act="pasteTx" data-id="${L.id}" data-then="close">✍️ ${L.segments.length ? 'Replace the transcript' : 'Paste a transcript'}</button>
+  <button class="btn soft" data-act="pasteTx" data-id="${L.id}" data-then="close">✍️ ${L.segments.length ? 'Replace with a pasted transcript' : 'Paste a transcript'}</button>
+  ${L.hasAudio && nav.api.stt ? `<button class="btn soft" data-act="retranscribe" data-id="${L.id}">🔁 Transcribe the recording again</button>` : ''}
+  ${versionsOf(L).length ? `<button class="btn soft" data-act="tversions" data-id="${L.id}">🗂 Transcript versions (${versionsOf(L).length})</button>` : ''}
   ${nav.api.llm && L.segments.length && !L.fixture ? `<button class="btn soft" data-act="reanalyse" data-id="${L.id}">🔁 Explain again with AI</button>` : ''}
   <button class="btn soft" data-act="scanLec" data-id="${L.id}">🔎 Look for tasks in this lecture</button>
   <button class="btn danger" data-act="delLec" data-id="${L.id}">🗑 Delete this lecture</button></div>
@@ -254,7 +265,7 @@ H.delLec = async d => {
 };
 H.reanalyse = async d => {
   closeSheet(); const L = lec(d.id); sheet('<h3>🐱 Making this make sense…</h3>', { label: 'Working' });
-  try { const { registerConcepts } = await import('./kb.js'); const r = await api('/api/analyze', { course: course(L.courseId).name, segments: L.segments.map((s, i) => ({ i, t: s.t, text: segText(s) })) }); if (r.concepts && r.concepts.length) { L.concepts = r.concepts; L.cids = registerConcepts(r.concepts); save('lectures', L); } closeSheet(); render(); toast('Explanations updated.'); }
+  try { const { registerConcepts } = await import('./kb.js'); const r = await api('/api/analyze', { course: course(L.courseId).name, segments: L.segments.map((s, i) => ({ i, t: s.t, text: segText(s), unclear: !!s.unclear })) }); if (r.concepts && r.concepts.length) { L.concepts = r.concepts; L.cids = registerConcepts(r.concepts); save('lectures', L); } closeSheet(); render(); toast('Explanations updated.'); }
   catch (e) { closeSheet(); toast("I couldn't reach the explainer. Nothing changed."); }
 };
 H.scanLec = d => { closeSheet(); const L = lec(d.id), n = scanTasks(L); render(); toast(n ? `Found ${n} possible task${n === 1 ? '' : 's'}. They wait for you to confirm.` : 'No new tasks found.'); };
@@ -270,7 +281,7 @@ async function rescueHTML(L, now) {
   if (nav.api.llm) {
     try {
       const wseg = L.segments.filter(s => s.t <= now && s.t >= now - 300), known = ids().filter(id => fam(id) >= 70).map(nm);
-      llmPart = await api('/api/rescue', { segments: wseg.map((s, i) => ({ i, t: s.t, text: segText(s) })), known });
+      llmPart = await api('/api/rescue', { segments: wseg.map((s, i) => ({ i, t: s.t, text: segText(s), unclear: !!s.unclear })), known });
     } catch (e) { llmPart = null; }
   }
   return `<h3>🐱 You're okay. Here's where we are.</h3><p class="small muted">Based on what was said between ${win}.</p>
@@ -322,7 +333,7 @@ register('lec', {
     const prim = TABS.slice(0, NPRIMARY), sec = TABS.slice(NPRIMARY), curSec = sec.find(t => t[0] === tab);
     return `${lectureCrumbs(L)}
     <div class="hdr-row"><div><p class="muted" style="margin:0">${esc(c ? c.code || c.name : '')}</p><h1>${esc(L.title)} 🌸</h1><p class="muted">${dateLabel(L.date)}${dur} · ${statusChip(L)}</p></div><button class="btn soft" data-act="lecMenu" data-id="${L.id}" aria-haspopup="dialog">⋯ Manage</button></div>
-    ${L.fixture ? `<div class="paper small">🧪 Sample lecture so you can try everything. Its transcript is written by hand, not recorded${L.hasAudio ? ", so it does not match the audio you attached" : ''}. Real recordings and your own transcripts work the same way.</div>` : SRC[L.transcriptSource] ? `<p class="small muted">${SRC[L.transcriptSource]}</p>` : ''}
+    ${L.fixture ? `<div class="paper small">🧪 Sample lecture so you can try everything. Its transcript is written by hand, not recorded${L.hasAudio ? ", so it does not match the audio you attached" : ''}. Real recordings and your own transcripts work the same way.</div>` : SRC[L.transcriptSource] && !(L.segments.length && ['stt', 'live', 'pasted'].includes(L.transcriptSource)) ? `<p class="small muted">${SRC[L.transcriptSource]}</p>` : ''}
     ${tagChips('lectures', L)}
     <div class="ltabs" role="navigation" aria-label="Lecture sections">${prim.map(([k, l]) => `<a class="pill${tab === k ? ' on' : ''}" href="#/l/${L.id}/${k}" ${tab === k ? 'aria-current="page"' : ''}>${l}</a>`).join('')}${sec.map(([k, l]) => `<a class="pill tab-sec${tab === k ? ' on' : ''}" href="#/l/${L.id}/${k}" ${tab === k ? 'aria-current="page"' : ''}>${l}</a>`).join('')}<button class="pill tab-more${curSec ? ' on' : ''}" data-act="moreTabs" data-id="${L.id}">${curSec ? curSec[1] : 'More'} ▾</button></div>
     ${body}`;

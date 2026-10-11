@@ -8,6 +8,8 @@ import { crumbs } from './ui.js';
 import { parseTranscript, scanTasks } from './actions.js';
 import { WEEK3_SAMPLE } from './fixtures.js';
 import * as player from './player.js';
+import { LANGS, SR_LOCALE } from './transcripts.js';
+import { applyTranscript } from './transcripts-core.js';
 
 const POLL_MS = 2000;
 const STT = () => nav.api.stt;
@@ -21,7 +23,7 @@ register('add', {
     const cid = V.c && course(V.c) ? V.c : (D.meta.cur && course(D.meta.cur) ? D.meta.cur : D.courses[0].id), mid = V.m && mod(V.m) ? V.m : '';
     const s = STT();
     const note = s === 'openai' ? `<p class="muted">Attach audio and I'll write the transcript with timestamps. <b>The audio is sent to OpenAI to be transcribed</b>, then deleted from the server. Prefer not to? Paste a transcript instead.</p><label class="small"><input type="checkbox" id="cons"> I understand my audio is sent to OpenAI.</label>`
-      : s === 'local' ? `<p class="muted">Attach audio and I'll write the transcript with timestamps. It is transcribed on this app's own server, not by a third party, and the server's copy is deleted afterwards.</p>`
+      : s ? `<p class="muted">Attach audio and I'll write the transcript with timestamps. It is transcribed on this app's own server, not by a third party, and the server's copy is deleted afterwards. The original recording stays in your browser, so you can transcribe it again later.</p>`
         : `<p class="muted">No transcription service is connected, so audio can't be turned into text automatically. You can still attach the audio (it stays with your notes and you can jump to moments in it) and paste a transcript from your university or any other tool. Lines like <code>12:14 text…</code> keep their timestamps.</p>`;
     return `${crumbs([['Home', '#/'], ['Bring a lecture in', '']])}<h1>📎 Bring a lecture in</h1>
     <form id="addform" class="paper" novalidate>
@@ -30,6 +32,8 @@ register('add', {
       <label class="fld"><span>Week / module</span><select id="a-mod"><option value="">Not in a week yet</option>${weekOptions(cid, mid)}</select></label>
       <label class="fld"><span>…or create a new week</span><input id="a-newmod" type="text" placeholder="e.g. Week 3 — Linking and compilation" autocomplete="off"></label>
       <label class="fld"><span>Date</span><input id="a-date" type="date" value="${todayISO()}"></label>
+      <label class="fld"><span>Spoken language</span><select id="a-lang">${LANGS.map(l => `<option value="${l.v}"${l.v === (D.meta.sttLang || 'auto') ? ' selected' : ''}>${l.l}</option>`).join('')}</select></label>
+      <p class="small muted">If the lecture is in one language, choose it: that is more accurate than detecting it. Lectures that mix German and English work best with the language the professor mostly speaks.</p>
       <h3>Audio</h3>${note}
       <p><input type="file" id="a-file" accept="audio/*,video/mp4" aria-label="Audio file"></p>
       <h3>Transcript</h3>
@@ -58,8 +62,9 @@ async function makeLecture() {
   const L = {
     id: uid('L'), courseId: cid, moduleId: mid || null, title: $('#a-title').value.trim() || 'Lecture ' + D.meta.seq, date: $('#a-date').value || todayISO(), segments: segs, duration: segs.length ? segs[segs.length - 1].t + 30 : 0,
     status: segs.length || f ? 'processing' : 'draft', hasAudio: !!f, mime: f ? f.type : '', tags: [], cleanEdits: {}, cleanAdds: [], playPos: 0, created: Date.now(), order: lecturesOf(cid).length + 1,
-    transcriptSource: tx ? (txEl.dataset.sample ? 'fixture' : 'pasted') : f ? 'pending' : 'none'
+    transcriptSource: tx ? (txEl.dataset.sample ? 'fixture' : 'pasted') : f ? 'pending' : 'none', lang: ($('#a-lang').value !== 'auto' ? $('#a-lang').value : '')
   };
+  D.meta.sttLang = $('#a-lang').value;
   if (txEl.dataset.sample) L.fixture = 'esc401-w3-sample';
   D.meta.seq++; D.meta.cur = cid; saveMeta();
   if (f) { await putChunk(L.id + ':000000', f); const d = await audioLength(f); if (d) L.duration = Math.max(L.duration, d); }
@@ -70,38 +75,43 @@ async function makeLecture() {
 /* ---------- processing: transcript (if needed) -> concepts -> ready ---------- */
 const PROC = new Set();
 export const isProcessing = id => PROC.has(id);
-function sttPrompt(L) { const names = Object.keys(courseConcepts(L.courseId)).map(nm); return ((course(L.courseId) || {}).name + '. Terms: ' + names.join(', ')).slice(0, 700); }
-export async function transcribeLecture(L) {
+export async function transcribeLecture(L, opt = {}) {
   PROC.add(L.id);
   try {
     const parts = await getChunks(L.id + ':'); if (!parts.length) throw new Error('no audio');
     const blob = new Blob(parts, { type: L.mime || parts[0].type || 'application/octet-stream' });
-    const r = await fetch('/api/transcribe?' + new URLSearchParams({ prompt: sttPrompt(L) }), { method: 'POST', headers: { 'content-type': blob.type || 'application/octet-stream' }, body: blob });
+    const glossary = (opt.glossary || '').slice(0, 600), lang = opt.lang || L.lang || 'auto';
+    // Only an explicit glossary is passed on. Course names and concept lists are NOT fed to the recogniser: that can make it "hear" words nobody said.
+    const r = await fetch('/api/transcribe?' + new URLSearchParams({ lang, glossary, prompt: glossary }), { method: 'POST', headers: { 'content-type': blob.type || 'application/octet-stream' }, body: blob });
     if (!r.ok) throw new Error('stt ' + r.status);
     const { job } = await r.json();
     for (; ;) {
       await new Promise(x => setTimeout(x, POLL_MS));
       const jr = await fetch('/api/job/' + job); if (!jr.ok) throw new Error('job lost');
       const j = await jr.json(), p = $('#ppct'); if (p && V.n === 'proc') p.textContent = j.progress ? Math.round(j.progress * 100) + '%' : '';
-      if (j.status === 'done') { L.segments = j.segments.map(s => ({ t: s.t, text: s.text, lowconf: s.lowconf })); L.transcriptSource = 'stt'; if (L.segments.length) L.duration = Math.max(L.duration || 0, L.segments[L.segments.length - 1].t + 10); save('lectures', L); return; }
+      if (j.status === 'done') {
+        applyTranscript(L, j.segments, { source: 'stt', meta: j.meta || null, lang: lang !== 'auto' ? lang : '', label: opt.again ? 'transcribed again' : '' });
+        L.lang = lang !== 'auto' ? lang : (j.meta && j.meta.language) || ''; L.langChosen = lang !== 'auto'; save('lectures', L); return;
+      }
       if (j.status === 'error') throw new Error('stt failed');
     }
   } finally { PROC.delete(L.id); }
 }
 async function runProc(L) {
   let note = '';
-  if (L.hasAudio && !L.segments.length) {
+  const again = L.pendingTx, wantLive = L.transcriptSource === 'live' && STT();
+  if (L.hasAudio && (!L.segments.length || again || wantLive)) {
     if (!STT()) { note = '🌱 No transcription service is connected, so there is nothing to explain yet. Your audio is safe. Paste a transcript on the lecture page.'; }
     else {
       $('#ptitle').textContent = '🎧 Listening to your recording…';
-      try { await transcribeLecture(L); }
-      catch (e) { if (V.n === 'proc' && V.id === L.id) { $('#ptitle').textContent = "🎧 I couldn't process this recording yet. Your audio is safe. Let's try again."; $('#ppct').textContent = ''; $('#pdone').innerHTML = `<button class="btn" data-act="recover" data-id="${L.id}">Try again</button> <a class="btn ghost" href="#/l/${L.id}/orig">Open the lecture anyway</a>`; } return; }
+      try { await transcribeLecture(L, { ...(again || {}), again: !!again || wantLive }); delete L.pendingTx; save('lectures', L); }
+      catch (e) { if (L.segments.length) { L.status = 'ready'; save('lectures', L); } if (V.n === 'proc' && V.id === L.id) { $('#ptitle').textContent = "🎧 I couldn't process this recording yet. Your audio is safe" + (L.segments.length ? ' and your current transcript is unchanged' : '') + ". Let's try again."; $('#ppct').textContent = ''; $('#pdone').innerHTML = `<button class="btn" data-act="recover" data-id="${L.id}">Try again</button> <a class="btn ghost" href="#/l/${L.id}/orig">Open the lecture anyway</a>`; } return; }
     }
   }
   if (nav.api.llm && !L.fixture && L.segments.length && !L.concepts) {
     if (V.n === 'proc' && V.id === L.id) $('#ptitle').textContent = '🐱 Making this make sense…';
     try {
-      const r = await api('/api/analyze', { course: course(L.courseId).name, segments: L.segments.map((s, i) => ({ i, t: s.t, text: segText(s) })) });
+      const r = await api('/api/analyze', { course: course(L.courseId).name, segments: L.segments.map((s, i) => ({ i, t: s.t, text: segText(s), unclear: !!s.unclear })) });
       if (r.concepts && r.concepts.length) { L.concepts = r.concepts; L.cids = registerConcepts(r.concepts); } else note = '🌱 I need a little more of the lecture to explain this properly.';
     } catch (e) { note = '🎧 I could not reach the explainer, so I used the built-in vocabulary. Your transcript is safe.'; }
   }
@@ -125,8 +135,9 @@ register('proc', {
 H.recover = d => { const L = lec(d.id); if (!L) return; if (L.segments.length) L.duration = Math.max(L.duration, L.segments[L.segments.length - 1].t + 30); L.status = 'processing'; save('lectures', L); go('proc', { id: L.id }); };
 
 /* ---------- attach audio to an existing lecture ---------- */
-H.attachAudio = d => {
+H.attachAudio = async d => {
   closeSheet(); const L = lec(d.id); if (!L) return;
+  if (L.hasAudio && !await confirmSheet({ title: 'Replace the recording?', intro: 'The current recording will be deleted from this device. This cannot be undone. If you only want a fresh transcript, use “Transcribe again” instead.', ok: 'Replace the recording', danger: true })) return;
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'audio/*,video/mp4';
   inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
@@ -152,11 +163,15 @@ H.startRec = async d => {
   if (rec) return go('rec');
   const cid = d.c || D.meta.cur || (D.courses[0] && D.courses[0].id); if (!cid) return toast('Make a course first.');
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { return toast("🎧 I can't reach the microphone. Allow microphone access in your browser, or upload a recording instead."); }
-  const L = { id: uid('L'), courseId: cid, moduleId: d.m || null, title: 'Lecture ' + D.meta.seq, date: todayISO(), segments: [], duration: 0, status: 'recording', hasAudio: true, tags: [], cleanEdits: {}, cleanAdds: [], playPos: 0, created: Date.now(), order: lecturesOf(cid).length + 1, transcriptSource: 'live' };
+  try {
+    // Lecture-hall speech is far from the microphone. Call-style noise suppression and echo cancellation can gate quiet speech and add warble,
+    // so they are off; automatic gain stays on so a distant professor is not too quiet. Mono is enough and halves the data.
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+  } catch (e) { return toast("🎧 I can't reach the microphone. Allow microphone access in your browser, or upload a recording instead."); }
+  const L = { id: uid('L'), courseId: cid, moduleId: d.m || null, title: 'Lecture ' + D.meta.seq, date: todayISO(), segments: [], duration: 0, status: 'recording', hasAudio: true, tags: [], cleanEdits: {}, cleanAdds: [], playPos: 0, created: Date.now(), order: lecturesOf(cid).length + 1, transcriptSource: 'live', lang: D.meta.sttLang && D.meta.sttLang !== 'auto' ? D.meta.sttLang : '' };
   const mt = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)); L.mime = mt || '';
   let mr;
-  try { mr = new MediaRecorder(stream, mt ? { mimeType: mt } : undefined); } catch (e) { stream.getTracks().forEach(t => t.stop()); return toast('🎧 This browser cannot record audio. Try Chrome or Safari, or upload a recording.'); }
+  try { mr = new MediaRecorder(stream, mt ? { mimeType: mt, audioBitsPerSecond: 96000 } : { audioBitsPerSecond: 96000 }); } catch (e) { stream.getTracks().forEach(t => t.stop()); return toast('🎧 This browser cannot record audio. Try Chrome or Safari, or upload a recording.'); }
   D.meta.seq++; D.meta.cur = cid; saveMeta(); add('lectures', L);
   rec = { L, stream, mr, n: 0, base: 0, t0: performance.now(), paused: false, interim: '' };
   mr.ondataavailable = e => { if (e.data && e.data.size) putChunk(L.id + ':' + String(rec ? rec.n++ : 900000).padStart(6, '0'), e.data); }; mr.start(4000);
@@ -166,8 +181,8 @@ H.startRec = async d => {
 };
 function startSR() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) { rec.noSR = true; return; }
-  const r = new SR(); r.continuous = true; r.interimResults = true; r.lang = 'en-US';
-  r.onresult = e => { let interim = ''; for (let i = e.resultIndex; i < e.results.length; i++) { const res = e.results[i]; if (res.isFinal) { const tx = res[0].transcript.trim(); if (tx) { const t = Math.max(0, Math.floor(elapsed() - tx.length / 14)); rec.L.segments.push({ t, text: tx, lowconf: res[0].confidence && res[0].confidence < .6 }); save('lectures', rec.L); } } else interim += res[0].transcript; } rec.interim = interim; updateLive(); };
+  const r = new SR(); r.continuous = true; r.interimResults = true; r.lang = SR_LOCALE[rec.L.lang || (navigator.language || 'en').slice(0, 2)] || navigator.language || 'en-US';
+  r.onresult = e => { let interim = ''; for (let i = e.resultIndex; i < e.results.length; i++) { const res = e.results[i]; if (res.isFinal) { const tx = res[0].transcript.trim(); if (tx) { const t = Math.max(0, Math.floor(elapsed() - tx.length / 14)); rec.L.segments.push({ t, text: tx, lowconf: res[0].confidence && res[0].confidence < .6, ...(res[0].confidence && res[0].confidence < .6 ? { unclear: true, reasons: ['low-confidence'] } : {}) }); save('lectures', rec.L); } } else interim += res[0].transcript; } rec.interim = interim; updateLive(); };
   r.onend = () => { if (rec && !rec.paused && !rec.stopping) { try { r.start(); } catch (e) { } } };
   r.onerror = e => { if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { rec && (rec.noSR = true); updateLive(); } };
   try { r.start(); rec.sr = r; } catch (e) { rec.noSR = true; }
@@ -181,8 +196,8 @@ register('rec', {
     <p class="center muted" id="topic">🌱 Listening…</p>
     <button class="rescuebtn" data-act="liveRescue">🆘 What is happening right now?</button>
     <div class="ctl"><button data-act="pauseRec" id="pausebtn">⏸ Pause</button><button class="stop" data-act="stopRec">⏹ Stop</button></div>
-    <p class="small muted center" id="srnote"></p><div class="live" id="live" aria-live="off"></div>
-    <p class="small muted center">Audio stays on this device. Live text comes from your browser's speech service (in Chrome it may send audio to Google).</p>`;
+    <p class="center"><label class="small">Live draft language <select id="reclang" data-ch="recLang" aria-label="Live draft language">${LANGS.filter(l => l.v !== 'auto').map(l => `<option value="${l.v}"${l.v === (rec.L.lang || (navigator.language || 'en').slice(0, 2)) ? ' selected' : ''}>${l.l}</option>`).join('')}</select></label></p><p class="small muted center" id="srnote"></p><div class="live" id="live" aria-live="off"></div>
+    <p class="small muted center">The recording stays on this device and is the real record. The live text below is only a rough preview from your browser's speech service (in Chrome it sends audio to Google). ${STT() ? 'When you stop, I will write a proper transcript from the recording.' : 'No transcription service is connected, so this preview is all the text you get until you add one.'}</p>`;
   },
   after() {
     if (!rec) return; updateLive();
@@ -200,6 +215,7 @@ function updateLive() {
   $('#srnote').textContent = rec.noSR ? "Live text isn't available in this browser. Your audio is still being saved, and you can add a transcript afterwards." : '';
   const A = analyze(rec.L), last = A.order.length ? A.order[A.order.length - 1] : null; $('#topic').textContent = last ? `${KB[last].e} Right now: ${nm(last)}` : '🌱 Listening…';
 }
+HC.recLang = el => { if (!rec) return; rec.L.lang = el.value; D.meta.sttLang = el.value; saveMeta(); save('lectures', rec.L); try { if (rec.sr) { rec.sr.onend = null; rec.sr.stop(); } } catch (e) { } if (!rec.paused) startSR(); };
 H.pauseRec = () => { if (!rec) return; if (!rec.paused) { rec.base = elapsed(); rec.paused = true; rec.mr.pause(); try { rec.sr && rec.sr.stop(); } catch (e) { } $('#pausebtn').textContent = '▶ Resume'; } else { rec.t0 = performance.now(); rec.paused = false; rec.mr.resume(); startSR(); $('#pausebtn').textContent = '⏸ Pause'; } };
 H.stopRec = async () => {
   if (!rec) return; if (!await confirmSheet({ title: 'Stop and save this lecture?', intro: 'The recording is kept on this device.', ok: 'Stop and save' })) return;

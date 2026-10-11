@@ -208,3 +208,7 @@ h2.sect,h3.sect{display:block}
 .toast{pointer-events:auto}
 @media (max-width:999px){.toast{bottom:calc(82px + env(safe-area-inset-bottom,0px))}}
 body.has-player .toast{bottom:calc(150px + env(safe-area-inset-bottom,0px))}
+
+/* uncertain speech: underlined, never rewritten */
+.lowp{text-decoration:underline dotted var(--berry,#c2417a);text-underline-offset:3px;text-decoration-thickness:2px}
+.seg.unclear{border-left:4px dotted var(--berry,#c2417a);padding-left:8px}

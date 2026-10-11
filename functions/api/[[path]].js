@@ -3,7 +3,7 @@
 import { analyzeLecture, rescue, explainSelection } from "../../stages.mjs";
 
 const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
-const segs = a => (Array.isArray(a) ? a : []).slice(0, 1500).map((s, i) => ({ i: Number.isInteger(s.i) ? s.i : i, t: +s.t || 0, text: String(s.text || "").slice(0, 1200) }));
+const segs = a => (Array.isArray(a) ? a : []).slice(0, 1500).map((s, i) => ({ i: Number.isInteger(s.i) ? s.i : i, t: +s.t || 0, text: String(s.text || "").slice(0, 1200), unclear: !!s.unclear }));
 
 export async function onRequest({ request, env }) {
   const path = new URL(request.url).pathname.replace(/^\/api\//, "");
